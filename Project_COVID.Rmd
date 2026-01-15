@@ -1,0 +1,614 @@
+---
+title: "COVID Project"
+author: 
+date: "12/4/2023"
+output: html_document
+---
+
+
+## Load the necessary Libraries
+
+```{r}
+# Load the Libraries
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+suppressMessages(library(randomForest))
+suppressMessages(library(tidyverse))
+library(FNN)
+library(pROC)
+library(rpart)
+suppressMessages(library(xgboost))
+library(e1071)
+library(dplyr)
+library(leaps)
+```
+
+## Load the dataset
+
+```{r}
+# Load the Covids data set using the read.csv()
+file<-"covid.csv"
+df<-read.csv(file, stringsAsFactors=TRUE)
+#view first six rows of Birds data set
+head(df)
+```
+
+## EDA
+
+## summarize the data
+
+```{r}
+# summary of the data
+summary(df)
+#display rows and columns
+dim(df)
+# Structure of the data
+str(df)
+```
+
+```{r}
+# Descriptive statistics for the response variable
+summary(df$vaccinated_or_accept)
+```
+
+## Missing Values
+
+```{r}
+# count total missing values in each column
+sapply(df, function(x) sum(is.na(x)| x == "N/A"))
+
+# Handle Missing values
+# Replace "N/A" with actual NA in the data
+df[df == "N/A"] <- NA
+
+# Replace missing values with mode for categorical columns
+df <- df %>%
+  mutate(
+    state_senate_majority_political_affiliation = if_else(
+      is.na(state_senate_majority_political_affiliation),
+      names(sort(table(state_senate_majority_political_affiliation), decreasing = TRUE))[1],
+      state_senate_majority_political_affiliation
+    ),
+    state_house_majority_political_affiliation = if_else(
+      is.na(state_house_majority_political_affiliation),
+      names(sort(table(state_house_majority_political_affiliation), decreasing = TRUE))[1],
+      state_house_majority_political_affiliation
+    )
+  )
+```
+
+## Outliers Visualization
+
+# faceted histogram  for  all the quantitative predictor variables:
+
+```{r}
+suppressMessages(library(tidyverse))
+
+#make new df with only quantitative variables
+df.new <- df %>%
+  dplyr::select(., -vaccinated_or_accept, -governor_political_affiliation, -state_senate_majority_political_affiliation, -state_house_majority_political_affiliation) %>%
+  gather(.)
+
+#faceted histogram
+ggplot(data=df.new, mapping=aes(x=value)) +
+  geom_histogram(fill="rosybrown", bins=25) +
+  facet_wrap(~key, scales='free') 
+```
+
+## Check for normally distributed curves
+
+```{r}
+hist(df$unemployment_claims)
+hist(log10(df$unemployment_claims))
+
+hist(df$population)
+hist(log10(df$population))
+
+hist(df$number_of_births)
+hist(log10(df$number_of_births))
+
+hist(df$total_private_health_insurance_spending)
+hist(log10(df$total_private_health_insurance_spending))
+
+hist(df$average_monthly_snap_participants)
+hist(log10(df$average_monthly_snap_participants))
+
+hist(df$total_gross_state_product)
+hist(sqrt(df$total_gross_state_product))
+
+hist(df$drug_overdoses)
+hist(sqrt(df$drug_overdoses))  #or log transform 
+
+hist(df$uninsured)
+hist(sqrt(df$uninsured))
+```
+
+```
+alter the quantitative variables accordingly:
+-unemployment_claims is right-skewed, log transform
+-population is right-skewed, log transform
+-private_health_insurance_spending right skewed, log transform
+-number_of_births right skewed, log transform 
+-both sqrt and log transformation make drug_overdoses more even
+-sqrt makes uninsured more even
+-total gross product right skewed, log transform
+-average monthly snap right skewed, log transform
+-infant mortality rate, firearms, median household income, smoking, hospital in-patient look fine
+
+```
+
+```{r}
+df %>%
+  filter(., average_monthly_snap_participants>0, drug_overdoses>0, number_of_births>0, population>0, total_gross_state_product>0, total_private_health_insurance_spending>0, unemployment_claims>0, uninsured>0) -> df_t
+
+
+df_t$average_monthly_snap_participants = log10(df_t$average_monthly_snap_participants)
+df_t$drug_overdoses = sqrt(df_t$drug_overdoses)
+df_t$number_of_births = log10(df_t$number_of_births)
+df_t$population = log10(df_t$population)
+df_t$total_gross_state_product = log10(df_t$total_gross_state_product)
+df_t$total_private_health_insurance_spending = log10(df_t$total_private_health_insurance_spending)
+df_t$unemployment_claims = log10(df_t$unemployment_claims)
+df_t$uninsured = sqrt(df_t$uninsured)
+```
+
+#faceted histogram after for all the quantitative predictor variables:
+
+```{r}
+df.t.new <- df_t %>%
+  dplyr::select(., -vaccinated_or_accept, -governor_political_affiliation, -state_senate_majority_political_affiliation, -state_house_majority_political_affiliation) %>%
+  gather(.)
+
+#faceted histogram
+ggplot(data=df.t.new, mapping=aes(x=value)) +
+  geom_histogram(fill="blue", bins=25) +
+  facet_wrap(~key, scales='free') 
+```
+
+## Histogram for the Response Variable
+
+```{r}
+ggplot(data=df,mapping=aes(x=vaccinated_or_accept)) + # insert response here
+ geom_histogram(color="blue",fill="yellow",bins=25) 
+```
+
+
+# response variable can be sqrt transformed?
+
+```{r}
+hist(sqrt(df_t$vaccinated_or_accept))
+```
+
+# Faceted Scatter Plots of Response versus Quantitative Predictors
+
+```{r}
+df.scatter <- df_t %>% 
+  dplyr::select(.,-vaccinated_or_accept) %>% 
+  gather(.)
+
+ggplot(data=df.scatter, mapping=aes(x=value,y=rep(df_t$vaccinated_or_accept,ncol(df_t)-1))) +
+  geom_point(size=0.1) +
+  facet_wrap(~key, scales='free')
+```
+
+## Modeling Classification Model
+
+```{r}
+# split training and test sets 70/30
+set.seed(3403)
+s <- sample(nrow(df_t),round(0.7*nrow(df_t)))
+df.train <- df_t[s,]
+df.test <- df_t[-s,]
+```
+
+```
+To split the data into training and test sets, we first set the random seed to ensure reproducibility. We then randomly sample 70% of the rows from the Covid dataset for the training set while leaving the remaining 30% for the test set. This split helps create two distinct subsets for training and testing machine learning models. The df.train data frame contains 70% of the data for model training for the variable, while the df.test data frame holds the remaining 30% for testing the model's performance for the remaining dataset. This random and stratified split is essential for assessing how well the model generalizes to new, unseen data points.
+```
+
+```{r}
+threshold <- 84 # Took the median value of the column
+# Convert vaccinated_or_accept to a binary factor
+df.train$vaccinated_or_accept <- as.factor(ifelse(df.train$vaccinated_or_accept >= threshold, "Accept", "Reject"))
+df.test$vaccinated_or_accept <- as.factor(ifelse(df.test$vaccinated_or_accept >= threshold, "Accept", "Reject"))
+```
+
+
+## Logistic Regression
+
+```{r}
+# Fit a logistic regression model with the selected variables
+lm_model <- glm(vaccinated_or_accept ~ ., data = df.train, family = "binomial")
+
+# Evaluate the model on the test set
+predictions <- predict(lm_model, newdata = df.test, type = "response")
+
+# Make the ROC curve
+(roc_LR = roc(df.test$vaccinated_or_accept,predictions))
+plot(roc_LR,col="red",xlim=c(1,0),ylim=c(0,1))
+```
+
+## Calculate the Youden’s J statistics to get the threshold.
+
+```{r}
+j_LR <- roc_LR$sensitivities + roc_LR$specificities - 1
+threshold_LR <- roc_LR$thresholds[which.max(j_LR)]
+
+# Convert predicted probabilities to binary (0 or 1)
+predicted_classes <- ifelse(predictions > threshold_LR, "ACCEPT", " REJECT")
+
+# Create a confusion matrix
+tab <- table(Actual = df.test$vaccinated_or_accept, Predicted = predicted_classes)
+
+#Display the confusion matrix
+print(tab)
+
+# Calculate the misclassification rate with the formula  (FP+FN)/(TP+TN+FP+FN)
+misclassification_rate_LR <- 1 - sum(diag(tab)) / sum(tab)
+
+
+# Display the misclassification rate
+cat("Misclassification Rate:", misclassification_rate_LR, "\n")
+```
+
+## Random Forest
+
+```{r}
+set.seed(3403)
+
+# Convert the response variable to numeric (0 for "Reject", 1 for "Accept")
+df.train$vaccinated_or_accept <- as.numeric(factor(df.train$vaccinated_or_accept, levels = c("Reject", "Accept"), ordered = TRUE)) - 1
+df.test$vaccinated_or_accept <- as.numeric(factor(df.test$vaccinated_or_accept, levels = c("Reject", "Accept"), ordered = TRUE)) - 1
+
+# Fit Random Forest model
+rf.out <- randomForest(vaccinated_or_accept ~ ., data = df.train, importance = TRUE)
+resp.pred <- predict(rf.out, newdata = df.test)
+
+# Calculate mean squared error
+round(mean((resp.pred - df.test$vaccinated_or_accept)^2), 3)
+
+# Variable importance plot
+varImpPlot(rf.out, type = 1)
+
+(roc_RF = roc(df.test$vaccinated_or_accept,resp.pred))
+plot(roc_RF,col="red",xlim=c(1,0),ylim=c(0,1))
+```
+
+## Calculate the Youden’s J statistics to get the threshold.
+
+```{r}
+# Calculate the Youden’s J statistics to get the threshold.
+j_RF <- roc_RF$sensitivities + roc_RF$specificities - 1
+threshold_RF <- roc_RF$thresholds[which.max(j_RF)]
+
+# Ensure threshold is between 0 and 1
+threshold_RF <- pmax(0, pmin(1, threshold_RF))
+
+# Convert predicted probabilities to binary (0 or 1)
+predicted_classes_RF <- ifelse(resp.pred > threshold_RF, "ACCEPT", " REJECT")
+
+# Create a confusion matrix
+tab_RF <- table(Actual = df.test$vaccinated_or_accept, Predicted = predicted_classes_RF)
+
+# Display the confusion matrix
+print(tab_RF)
+
+# Calculate the misclassification rate
+misclassification_rate_RF <- 1 - sum(diag(tab_RF)) / sum(tab_RF)
+
+# Display the misclassification rate
+cat("Misclassification Rate for Random Forest:", misclassification_rate_RF, "\n")
+```
+
+
+## KNN
+
+```{r}
+k.max = 30
+mse.k = rep(NA,k.max)
+for ( kk in 1:k.max ) {
+  knn.out = knn.reg(train=select(df.train, -vaccinated_or_accept, -governor_political_affiliation, -state_senate_majority_political_affiliation, -state_house_majority_political_affiliation),y=df.train$vaccinated_or_accept,k=kk,algorithm="brute")
+  mse.k[kk] = mean((knn.out$pred-df.train$vaccinated_or_accept)^2)
+}
+k.min = which.min(mse.k)
+cat("The optimal number of nearest neighbors is ",k.min,"\n")
+
+knn.pred = knn.reg(train=select(df.train, -vaccinated_or_accept,-governor_political_affiliation, -state_senate_majority_political_affiliation, -state_house_majority_political_affiliation), test=select(df.test, -vaccinated_or_accept,-governor_political_affiliation, -state_senate_majority_political_affiliation, -state_house_majority_political_affiliation),y=df.train$vaccinated_or_accept, k=k.min,algorithm="brute")
+(knn.mse = mean((knn.out$pred-df.test$vaccinated_or_accept)^2))
+
+(roc_KNN = roc(df.test$vaccinated_or_accept, knn.pred$pred))
+plot(roc_KNN, col = "red", xlim = c(1, 0), ylim = c(0, 1))
+```
+
+```{r}
+ggplot(data=data.frame("k"=1:k.max,"mse"=mse.k),mapping=aes(x=k,y=mse)) + 
+  geom_point() + geom_line() +
+  xlab("Number of Nearest Neighbors k") + ylab("Validation MSE") + 
+  geom_vline(xintercept=k.min,color="red")
+```
+
+## Calculate the Youden’s J statistics to get the threshold.
+
+```{r}
+# Calculate the Youden’s J statistics to get the threshold.
+j_KNN <- roc_KNN$sensitivities + roc_KNN$specificities - 1
+threshold_KNN <- roc_KNN$thresholds[which.max(j_KNN)]
+
+# Ensure threshold is between 0 and 1
+threshold_KNN <- pmax(0, pmin(1, threshold_KNN))
+
+# Convert predicted probabilities to binary (0 or 1)
+predicted_classes_KNN <- ifelse(knn.pred$pred > threshold_KNN, "ACCEPT", "REJECT")
+
+# Create a confusion matrix
+conf_matrix_KNN <- table(Actual = df.test$vaccinated_or_accept, Predicted = predicted_classes_KNN)
+
+# Display the confusion matrix
+print(conf_matrix_KNN)
+
+# Calculate the misclassification rate
+misclassification_rate_KNN <- 1 - sum(diag(conf_matrix_KNN)) / sum(conf_matrix_KNN)
+
+# Display the misclassification rate
+cat("Misclassification Rate for K-nearest Neighbors:", misclassification_rate_KNN, "\n")
+```
+
+
+## SVM
+
+```{r}
+set.seed(3403)
+# Fit SVM model
+svm_model <- svm(vaccinated_or_accept ~ ., data = df.train)
+
+# Make predictions on the test set
+predictions_svm <- predict(svm_model, newdata = df.test)
+# Make the ROC curve
+(roc_SVM = roc(df.test$vaccinated_or_accept,predictions_svm))
+plot(roc_SVM,col="red",xlim=c(1,0),ylim=c(0,1))
+```
+
+## Calculate the Youden’s J statistics to get the threshold.
+
+```{r}
+# Calculate the Youden’s J statistics to get the threshold.
+j_SVM <- roc_SVM$sensitivities + roc_SVM$specificities - 1
+threshold_SVM <- roc_SVM$thresholds[which.max(j_SVM)]
+
+# Ensure threshold is between 0 and 1
+threshold_SVM <- pmax(0, pmin(1, threshold_SVM))
+
+# Convert predicted probabilities to binary (0 or 1)
+predicted_classes_SVM <- ifelse(predictions_svm > threshold_SVM, "ACCEPT", "REJECT")
+
+# Create a confusion matrix
+conf_matrix_SVM <- table(Actual = df.test$vaccinated_or_accept, Predicted = predicted_classes_SVM)
+
+# Display the confusion matrix
+print(conf_matrix_SVM)
+
+# Calculate the misclassification rate
+misclassification_rate_SVM <- 1 - sum(diag(conf_matrix_SVM)) / sum(conf_matrix_SVM)
+
+# Display the misclassification rate
+cat("Misclassification Rate for SVM:", misclassification_rate_SVM, "\n")
+```
+
+
+## Decision Tree
+
+```{r}
+set.seed(3403)
+# Fit a Decision Tree
+rpart.out <- rpart(vaccinated_or_accept~.,data=df.train)
+
+# Make predictions on the test set
+resp.pred <- predict(rpart.out,newdata=df.test)
+
+# Make the ROC curve
+(roc_DT = roc(df.test$vaccinated_or_accept,resp.pred))
+plot(roc_DT,col="red",xlim=c(1,0),ylim=c(0,1))
+```
+
+## Calculate the Youden’s J statistics to get the threshold.
+
+```{r}
+# Calculate the Youden’s J statistics to get the threshold.
+j_DT <- roc_DT$sensitivities + roc_DT$specificities - 1
+threshold_DT <- roc_DT$thresholds[which.max(j_DT)]
+
+# Ensure threshold is between 0 and 1
+threshold_DT <- pmax(0, pmin(1, threshold_DT))
+
+# Convert predicted probabilities to binary (0 or 1)
+predicted_classes_DT <- ifelse(resp.pred > threshold_DT, "ACCEPT", "REJECT")
+
+# Create a confusion matrix
+conf_matrix_DT <- table(Actual = df.test$vaccinated_or_accept, Predicted = predicted_classes_DT)
+
+# Display the confusion matrix
+print(conf_matrix_DT)
+
+# Calculate the misclassification rate
+misclassification_rate_DT <- 1 - sum(diag(conf_matrix_DT)) / sum(conf_matrix_DT)
+
+# Display the misclassification rate
+cat("Misclassification Rate for Decision Tree:", misclassification_rate_DT, "\n")
+
+```
+
+
+## XGBoost
+
+```{r}
+set.seed(3403)
+response_col <- "vaccinated_or_accept"
+# Extract response variable
+y_train <- df.train[[response_col]]
+y_test <- df.test[[response_col]]
+
+# Remove the response variable from the feature matrices
+X_train <- df.train[, !colnames(df.train) %in% response_col]
+X_test <- df.test[, !colnames(df.test) %in% response_col]
+
+# Identify categorical variables (assuming they start from the 7th column)
+categorical_cols <- 7:9  # Adjust these indices based on your actual data
+
+# One-hot encode categorical variables
+X_train <- model.matrix(~., data = X_train[, -categorical_cols])[, -1]
+X_test <- model.matrix(~., data = X_test[, -categorical_cols])[, -1]
+
+# Combine encoded features with the remaining numeric features
+X_train <- cbind(as.matrix(X_train), X_train[, -categorical_cols, drop = FALSE])
+X_test <- cbind(as.matrix(X_test), X_test[, -categorical_cols, drop = FALSE])
+
+# Create DMatrix objects
+dtrain <- xgb.DMatrix(data = X_train, label = y_train)
+dtest <- xgb.DMatrix(data = X_test, label = y_test)
+
+# Create and train the XGBoost model
+xgb_model <- xgboost(data = dtrain, nrounds = 100, objective = "reg:squarederror")
+
+# Make predictions on the test set
+xgb_preds <- predict(xgb_model, newdata = dtest)
+
+# ROC curve for XGBoost
+(roc_XGB = roc(y_test, xgb_preds))
+# Plot ROC curve for XGBoost
+plot(roc_XGB, col = "red", xlim = c(0, 1), ylim = c(0, 1), main = "ROC Curve")
+```
+
+## Calculate the Youden’s J statistics to get the threshold.
+
+```{r}
+# Calculate the Youden’s J statistics to get the threshold.
+j_XGB <- roc_XGB$sensitivities + roc_XGB$specificities - 1
+threshold_XGB <- roc_XGB$thresholds[which.max(j_XGB)]
+
+# Ensure threshold is between 0 and 1
+threshold_XGB <- pmax(0, pmin(1, threshold_XGB))
+
+# Convert predicted probabilities to binary (0 or 1)
+predicted_classes_XGB <- ifelse(xgb_preds > threshold_XGB, "ACCEPT", "REJECT")
+
+# Create a confusion matrix
+conf_matrix_XGB <- table(Actual = df.test$vaccinated_or_accept, Predicted = predicted_classes_XGB)
+
+# Display the confusion matrix
+print(conf_matrix_XGB)
+
+# Calculate the misclassification rate
+misclassification_rate_XGB <- 1 - sum(diag(conf_matrix_XGB)) / sum(conf_matrix_XGB)
+
+# Display the misclassification rate
+cat("Misclassification Rate for XGBoost:", misclassification_rate_XGB, "\n")
+```
+
+## Best Subset Model
+
+```{r}
+# Perform best-subset selection on the training data
+subset_model <- regsubsets(vaccinated_or_accept ~ ., data = df.train, method = "exhaustive")
+summary_subset <- summary(subset_model)
+
+# Identify the best subset
+best_subset <- which.max(summary_subset$adjr2)
+selected_vars <- names(df.train)[summary_subset$which[best_subset, ]]
+
+# Print or inspect the selected variables
+cat("Selected Variables:", selected_vars, "\n")
+
+
+# Fit a linear regression model with the selected variables
+lm_model <- lm(vaccinated_or_accept ~ ., data = df.train[, c("vaccinated_or_accept", selected_vars)], family = "binomial")
+
+# Evaluate the model on the test set
+predictions <- predict(lm_model, newdata = df.test[, c("vaccinated_or_accept", selected_vars)], type = "response")
+
+# Compute AUC for the logistic regression model
+(roc_BSS = roc(df.test$vaccinated_or_accept, predictions))
+plot(roc_BSS, col = "red", xlim = c(1, 0), ylim = c(0, 1))
+```
+
+## Calculate the Youden’s J statistics to get the threshold.
+
+```{r}
+# Calculate the Youden’s J statistics to get the threshold.
+j_BSS <- roc_BSS$sensitivities + roc_BSS$specificities - 1
+threshold_BSS <- roc_BSS$thresholds[which.max(j_BSS)]
+
+# Ensure threshold is between 0 and 1
+threshold_BSS <- pmax(0, pmin(1, threshold_BSS))
+
+# Convert predicted probabilities to binary (0 or 1) using the correct threshold
+predicted_classes_BSS <- ifelse(predictions > threshold_BSS, "ACCEPT", "REJECT")
+
+# Create a confusion matrix
+conf_matrix_BSS <- table(Actual = df.test$vaccinated_or_accept, Predicted = predicted_classes_BSS)
+
+# Display the confusion matrix
+print(conf_matrix_BSS)
+
+# Calculate the misclassification rate
+misclassification_rate_BSS <- 1 - sum(diag(conf_matrix_BSS)) / sum(conf_matrix_BSS)
+
+# Display the misclassification rate
+cat("Misclassification Rate for Best Subset Model:", misclassification_rate_BSS, "\n")
+```
+
+
+## AUC and MCR for the threshold for the Youden’s J for all the classification Models.
+
+```{r}
+# Create a data frame with model names, J statistics Threshold, Misclassification Rates and Area Under Curve.
+model_names <- c("Logistic Regression", "Decision Tree", "Random Forest", "XGBoost", "K-nearest Neighbors", "SVM", "BSS")
+
+# Get the J statistics Threshold,Misclassification Rates,Area Under Curve from the above models
+Threshold <- c(threshold_LR,threshold_DT,threshold_RF,threshold_XGB,threshold_KNN,threshold_SVM,threshold_BSS)
+misclassification_rate <- c(misclassification_rate_LR, misclassification_rate_DT, misclassification_rate_RF, misclassification_rate_XGB, misclassification_rate_KNN, misclassification_rate_SVM, misclassification_rate_BSS)
+AUC = c(auc(roc_LR), auc(roc_DT), auc(roc_RF),auc(roc_XGB), auc(roc_KNN), auc(roc_SVM), auc(roc_BSS))
+
+# Create the data frame
+results_df <- data.frame(Model = model_names, Threshold = Threshold, MCR = misclassification_rate, AUC=AUC)
+
+# Print the results table
+print(results_df)
+```
+
+## All ROC curve in one plot
+
+```{r}
+# Plot all ROC curves on the same plot
+plot(roc_LR, col = "blue", main = "ROC Curves for Different Models", lty = 1, lwd = 2)
+plot(roc_DT, col = "green", add = TRUE, lty = 2, lwd = 2)
+plot(roc_RF, col = "red", add = TRUE, lty = 3, lwd = 2)
+plot(roc_XGB, col = "purple", add = TRUE, lty = 4, lwd = 2)
+plot(roc_KNN, col = "orange", add = TRUE, lty = 5, lwd = 2)
+plot(roc_SVM, col = "brown", add = TRUE, lty = 6, lwd = 2)
+plot(roc_BSS, col = "darkmagenta",add = TRUE, lty = 7, lwd = 2)
+
+# Add legend
+legend("bottomright", legend = c("Logistic Regression", "Decision Tree", "Random Forest", "XGBoost", "KNN", "SVM","BSS"), 
+       col = c("blue", "green", "red", "purple", "orange", "brown","darkmagenta"), lty = 1:7, lwd = 2)
+```
+
+```
+The choice of the best model depends on the specific goals of the classification task. If the primary focus is on overall predictive performance and the ability to distinguish between classes, the Best Subset model with the highest AUC (1.0) might be preferred. However, if the emphasis is on minimizing misclassifications, the Random Forest model with the lowest Misclassification Rate (MCR = 0.06666667) could be considered the best choice. The optimal probability threshold is 0.4896500 and 0.5 respectively. And the confusion matrix for the given threshold is given in the Random Forest ,Best subset Model parts of the code. 
+Random Forest-
+                Predicted
+Actual    REJECT        ACCEPT
+     0       1           0
+     1       5           9
+Misclassification Rate: 0.06666667
+
+Best Subset Model-
+              Predicted
+Actual    ACCEPT    REJECT
+     0      0         5
+     1      10        0
+Misclassification Rate: 1 
+
+But we can conclude by saying that Random Forest performs well with having a good AUC score and lower Missclassification Rate score.
+```
+
+
