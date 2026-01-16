@@ -1,6 +1,6 @@
 # Factors Impacting COVID-19 Vaccine Adoption Across U.S. States
 
-# Final Group Poster – 36-600: Statistical Learning & Modeling
+Final Group Poster – 36-600: Statistical Learning & Modeling
 Carnegie Mellon University
 
 # Project Overview
